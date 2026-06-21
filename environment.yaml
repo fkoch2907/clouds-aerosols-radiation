@@ -1,0 +1,14 @@
+name: claera-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pillow
+  - matplotlib
+  - pandas
+  - pip
+  - pip:
+      - pvlib
