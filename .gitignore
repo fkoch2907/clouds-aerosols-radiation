@@ -1,2 +1,5 @@
 .DS_Store
 cloud-fraction/data
+.vscode/settings.json
+cloud-fraction/processed
+cloud-fraction/masks

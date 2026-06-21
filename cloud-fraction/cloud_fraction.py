@@ -66,6 +66,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 from scipy.ndimage import convolve
 
@@ -155,7 +156,7 @@ def sun_position(dt_utc: datetime, geo: CameraGeometry) -> tuple[float, float]:
     """Liefert (azimuth_deg, elevation_deg) der Sonne zur Zeit dt_utc."""
     import pvlib
 
-    times = pvlib.misc.pd.DatetimeIndex([dt_utc])
+    times = pd.DatetimeIndex([dt_utc])
     solpos = pvlib.solarposition.get_solarposition(
         times, geo.lat, geo.lon, altitude=geo.alt
     )
