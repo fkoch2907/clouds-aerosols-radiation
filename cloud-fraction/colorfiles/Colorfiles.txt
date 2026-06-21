@@ -1,0 +1,95 @@
+There are different files for camera number 1 and 2 (file FE1) and 3 and 4 (file FE3) due to slightly different hardware and/or firmware.
+
+The color files (one file for clear sky and one for clouds) each hold a 256 x 256 x 256 matrix of single bytes. This corresponds to the file size of 256^3 = 16777216 Bytes. 
+
+The sequence of the 16777216 colors (red,green,blue) in the color files is as follows:
+
+0,0,0    (the first byte is color R=0, G=0, B=0, this is black)
+0,0,1    (the second byte is color R=0, G=0, B=1)
+0,0,2    (the third byte is color R=0, G=0, B=2)
+0,0,3    (and so on)
+...
+0,0,254
+0,0,255  (the 256th byte is color R=0, G=0, B=255, this is blue)
+0,1,0
+0,1,1
+0,1,3
+...
+255,255,253
+255,255,254
+255,255,255  (the 16777216th byte is color R=255, G=255, B=255, this is white)
+
+Type definition in Pascal:
+
+TYPE
+  TWKMFarbHaufigkeiten = ARRAY[0..255,0..255,0..255] OF BYTE; { [R,G,B] }
+
+
+So, each byte in the file corresponds to one color in the RGB space and the value of the byte is either > 0 if it's "set" (e.g., this color denotes a cloud) or = 0 if it's "not set" (this color isn't a cloud).
+
+The value itself is a measure of how often it was selected in the training process. This is not relevant.
+
+To determine if a color is a cloud (or clear sky) you should have a look not only to this single color but also into the direct environment in the 3d color space. (Each point/color has 3x3x3-1 = 26 neighbors.) The following function gives the amount of "set" values of all 1+26 = 27 single colors:
+
+FUNCTION TWKMObjektFarben.GesetzteInUmgebung(R,G,B : INTEGER) : INTEGER;
+    VAR rr,gg,bb,r1,r2,g1,g2,b1,b2 : INTEGER;
+  BEGIN  // Gibt an, wieviel der 3x3x3 Farbwerte um RGB herum gesetzt sind.
+    r1 := Max(0,R-1);    // limits of the cube
+    r2 := Min(255,R+1);
+    g1 := Max(0,G-1);
+    g2 := Min(255,G+1);
+    b1 := Max(0,B-1);
+    b2 := Min(255,B+1);
+    Result := 0;
+    FOR rr := r1 TO r2 DO
+      FOR gg := g1 TO g2 DO
+        FOR bb := b1 TO b2 DO
+          IF Farben[rr,gg,bb] > 0 THEN    // testing if color is "set" (i.e., value > 0)
+            Result := Result + 1
+  END;
+
+After reading the two color files you can fill a third matrix that holds "cloud", "clear sky", "both", or "unknown" for each color: 
+
+PROCEDURE TWKMWolkenErkennung.LoadFromFiles(AHimmelFileName,AWolkenFileName : STRING);
+    VAR Himmel,Wolken : TWKMObjektFarben;
+        r,g,b,w,h : INTEGER;
+  BEGIN
+    Geladen := FALSE;
+    Himmel := TWKMObjektFarben.Create;
+    Wolken := TWKMObjektFarben.Create;
+    TRY
+      Himmel.LoadFromFile(AHimmelFileName);    // reading the two color files
+      Wolken.LoadFromFile(AWolkenFileName);
+      FOR r := 0 TO 255 DO  // Rot             // running through all colors
+        FOR g := 0 TO 255 DO  // Grün
+          FOR b := 0 TO 255 DO  // Blau
+            BEGIN
+              w := Wolken.GesetzteInUmgebung(r,g,b);  // testing if color is "cloud"
+              h := Himmel.GesetzteInUmgebung(r,g,b);  // testing if color is "clear sky"
+              IF (w > 0) AND (w = h) THEN
+                FErkennungsMatrix[r,g,b] := hoBeides     // Himmel oder Wolke
+              ELSE IF w > h THEN
+                FErkennungsMatrix[r,g,b] := hoWolke     // eher oder eindeutig Wolke
+              ELSE IF h > w THEN
+                FErkennungsMatrix[r,g,b] := hoHimmel    // eher oder eindeutig Himmel
+              ELSE
+                FErkennungsMatrix[r,g,b] := hoUnbekannt; // unbekannt
+            END;
+      FErkennungsMatrix[0,0,0] := hoMaske;         // schwarz (Maske)   // special values for black (mask) and white (sun)
+      FErkennungsMatrix[255,255,255] := hoSonne;   // weiß (Sonne)
+      Geladen := TRUE;
+    FINALLY
+      Wolken.Free;
+      Himmel.Free;
+    END;
+  END;
+
+with some constants (hoWolke, hoHimmel, ...), for example
+
+  hoUnbekannt = 0;  // bisher nicht zugeordnete Farben und Artefakte
+  hoWolke = 1;      // eindeutig oder überwiegend Wolke
+  hoHimmel = 2;     // eindeutig oder überwiegend blauer Himmel
+  hoBeides = 3;     // Wolke oder Himmel gleichermaßen möglich
+  hoSonne = 4;      // helles Licht der Sonne
+  hoMaske = 5;      // Maske zum Ausblenden von gestörten Bereichen
+
