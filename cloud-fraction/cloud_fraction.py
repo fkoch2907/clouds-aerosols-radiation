@@ -28,6 +28,20 @@ Pipeline
 5. Schreibt eine CSV mit Zeitstempel + Cloud Fraction pro Bild und plottet
    die Tageszeitreihe.
 
+1. Reads the two color frequency files (sky + clouds, 256^3 bytes each, in R-G-B order as described in Colorfiles.txt).
+2. For each of the 16,777,216 colors, calculates the number of “set” neighbors in the 3x3x3 cube (the Pascal equivalent of “SetsInNeighborhood”), separately for the sky and cloud files—vectorized using a 3D convolution instead of a triple loop.
+3. Construct a classification table (256x256x256 uint8) from this, analogous to LoadFromFiles: hoUnknown/hoCloud/hoSky/hoBoth, plus special cases hoMask (black) and hoSun (white).
+4. For each image in a daily folder:
+a) Calculate the sun’s position (azimuth/elevation) at the time of capture using the
+      camera coordinates (pvlib).
+b) Convert the sun’s position to image coordinates via fisheye projection
+ and mask a circle around the sun.
+c) Mask the outer edge (everything outside the fisheye circle).
+d) Color-code each remaining pixel using the classification table
+and write an output image (same size as the original).
+e) Cloud Fraction = cloud pixels / (clouds + sky + both) pixels.
+5. Write a CSV file with timestamps + cloud fraction per image and plot the time-of-day series.
+
 Abhängigkeiten: numpy, scipy, pillow, pvlib, matplotlib
     pip install numpy scipy pillow pvlib matplotlib
 
@@ -55,7 +69,17 @@ Annahmen, die ggf. an die eigene Kamera angepasst werden müssen
   YYYYMMDD_HHMMSS extrahiert (--timestamp_regex anpassbar) und als
   lokale Zeit in UTC angenommen (--utc_offset_hours anpassbar).
 """
+The fisheye lens is assumed to use an equidistant projection:
+  r(zenith) = R_max * zenith_rad / (FOV_rad/2)
+  If the camera uses a different projection (e.g., equisolid), simply
+  adjust the `zenith_to_radius` function.
+- Image center = center of the fisheye image. If the lens is not
+  exactly centered, set --center_x/--center_y.
+- By default, the timestamp is extracted from the filename as
+  YYYYMMDD_HHMMSS (--timestamp_regex is customizable) and assumed to be
+  local time in UTC (--utc_offset_hours is customizable).
 
+Translated with DeepL.com (free version)
 from __future__ import annotations
 
 import argparse
