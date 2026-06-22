@@ -68,7 +68,7 @@ Annahmen, die ggf. an die eigene Kamera angepasst werden müssen
 - Der Zeitstempel wird per Default aus dem Dateinamen als
   YYYYMMDD_HHMMSS extrahiert (--timestamp_regex anpassbar) und als
   lokale Zeit in UTC angenommen (--utc_offset_hours anpassbar).
-"""
+
 The fisheye lens is assumed to use an equidistant projection:
   r(zenith) = R_max * zenith_rad / (FOV_rad/2)
   If the camera uses a different projection (e.g., equisolid), simply
@@ -80,6 +80,8 @@ The fisheye lens is assumed to use an equidistant projection:
   local time in UTC (--utc_offset_hours is customizable).
 
 Translated with DeepL.com (free version)
+"""
+
 from __future__ import annotations
 
 import argparse
