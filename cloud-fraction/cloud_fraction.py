@@ -97,96 +97,98 @@ from PIL import Image
 from scipy.ndimage import convolve
 
 # ----------------------------------------------------------------------
-# Klassifikations-Codes (analog zu den Pascal-Konstanten in Colorfiles.txt)
+# classification-codes (analog to Pascal-constants in Colorfiles.txt)
 # ----------------------------------------------------------------------
-HO_UNBEKANNT = 0
-HO_WOLKE = 1
-HO_HIMMEL = 2
-HO_BEIDES = 3
-HO_SONNE = 4
-HO_MASKE = 5
+HO_UNKNOWN = 0
+HO_CLOUD = 1
+HO_SKY = 2
+HO_BOTH = 3
+HO_SUN = 4
+HO_MASK = 5
 
-# Darstellungsfarben (R,G,B) für das Output-Bild je Klasse
+# colors representing classes in output images (R,G,B)
 DISPLAY_COLORS = {
-    HO_UNBEKANNT: (128, 128, 128),  # grau
-    HO_WOLKE:     (255, 255, 255),  # weiß
-    HO_HIMMEL:    (0, 100, 255),    # blau
-    HO_BEIDES:    (255, 165, 0),    # orange
-    HO_SONNE:     (255, 255, 0),    # gelb
-    HO_MASKE:     (0, 0, 0),        # schwarz
+    HO_UNKNOWN: (128, 128, 128),  # grey
+    HO_CLOUD:     (255, 255, 255),  # white
+    HO_SKY:    (0, 100, 255),    # blue
+    HO_BOTH:    (255, 165, 0),    # orange
+    HO_SUN:     (255, 255, 0),    # yellow
+    HO_MASK:     (0, 0, 0),        # black
 }
 
-N = 256  # Farbwürfel-Kantenlänge
+N = 256  # edge length of color cube
 
 
 # ----------------------------------------------------------------------
-# 1) Farbdateien einlesen + Klassifikationstabelle aufbauen
+# 1) read color files + build classification table
 # ----------------------------------------------------------------------
 def load_color_cube(path: Path) -> np.ndarray:
-    """Liest eine 256^3-Byte Datei in der in Colorfiles.txt beschriebenen
-    Reihenfolge (äußerste Schleife R, dann G, dann B) ein."""
+    """Reads a 256^3-Byte file in the order described in Colorfiles.txt:
+    outer loop R, then G, then B."""
     data = np.fromfile(path, dtype=np.uint8)
     if data.size != N ** 3:
         raise ValueError(
-            f"{path} hat {data.size} Bytes, erwartet wurden {N**3} (256^3)."
+            f"{path} has {data.size} Bytes, expected were {N**3} (256^3)."
         )
-    return data.reshape(N, N, N)  # Achsen-Reihenfolge: [R, G, B]
+    return data.reshape(N, N, N)  # order of axes: [R, G, B]
 
 
-def gesetzte_in_umgebung(cube: np.ndarray) -> np.ndarray:
-    """Vektorisiertes Äquivalent von GesetzteInUmgebung: für jede Zelle
-    die Anzahl 'gesetzter' (>0) Nachbarn im 3x3x3-Würfel (inkl. sich selbst,
-    Ränder werden wie im Original per Clamping behandelt -> 'border' Modus
-    'nearest' bildet das exakt nach)."""
+def count_set_neighbors_in_neighborhood(cube: np.ndarray) -> np.ndarray:
+    """Vectorized equivalent of `SetsInNeighborhood`.
+
+    For every cell, this returns the number of “set” values (> 0) in the
+    3x3x3 neighborhood, including the cell itself. The edges are handled by
+    clamping at the borders, which is reproduced exactly by convolution with
+    `mode="nearest"`.
+    """
     set_mask = (cube > 0).astype(np.uint8)
     kernel = np.ones((3, 3, 3), dtype=np.uint8)
-    # mode='nearest' entspricht dem Clamping (Max(0,R-1), Min(255,R+1)) im Pascal-Code
+    # mode='nearest' corresponds to Clamping (Max(0,R-1), Min(255,R+1)) in Pascal-code
     counts = convolve(set_mask, kernel, mode="nearest")
     return counts
 
 
-def build_classification_table(himmel_path: Path, wolken_path: Path) -> np.ndarray:
-    """Baut die FErkennungsMatrix [R,G,B] -> Klassen-Code."""
-    himmel = load_color_cube(himmel_path)
-    wolken = load_color_cube(wolken_path)
+def build_classification_table(sky_path: Path, cloud_path: Path) -> np.ndarray:
+    """Builds recognition table [R,G,B] -> class code."""
+    sky = load_color_cube(sky_path)
+    cloud = load_color_cube(cloud_path)
 
-    h = gesetzte_in_umgebung(himmel)
-    w = gesetzte_in_umgebung(wolken)
+    h = count_set_neighbors_in_neighborhood(sky)
+    w = count_set_neighbors_in_neighborhood(cloud)
 
-    table = np.full((N, N, N), HO_UNBEKANNT, dtype=np.uint8)
-    table[(w > 0) & (w == h)] = HO_BEIDES
-    table[w > h] = HO_WOLKE
-    table[h > w] = HO_HIMMEL
-    # restliche Fälle (w == h == 0) bleiben HO_UNBEKANNT
+    table = np.full((N, N, N), HO_UNKNOWN, dtype=np.uint8)
+    table[(w > 0) & (w == h)] = HO_BOTH
+    table[w > h] = HO_CLOUD
+    table[h > w] = HO_SKY   # other cases(w == h == 0) remain HO_UNKNOWN
 
-    table[0, 0, 0] = HO_MASKE   # schwarz
-    table[255, 255, 255] = HO_SONNE  # weiß
+    table[0, 0, 0] = HO_MASK   # black
+    table[255, 255, 255] = HO_SUN  # white
     return table
 
 
 # ----------------------------------------------------------------------
-# 2) Sonnenposition -> Bildkoordinaten (Fisheye-Geometrie)
+# 2) Sun position -> image coordinates (Fisheye-geometry)
 # ----------------------------------------------------------------------
 @dataclass
 class CameraGeometry:
     lat: float
     lon: float
     alt: float
-    fov_deg: float          # voller Öffnungswinkel der Fisheye-Optik (typ. 180°)
-    center_x: float | None  # None => Bildmitte
+    fov_deg: float           # full field of view of the fisheye lens (typ. 180°)
+    center_x: float | None   # None => image center
     center_y: float | None
     radius_px: float | None  # None => min(width,height)/2 - edge_margin
 
 
 def sun_position(dt_utc: datetime, geo: CameraGeometry) -> tuple[float, float]:
-    """Liefert (azimuth_deg, elevation_deg) der Sonne zur Zeit dt_utc."""
+    """Returns (azimuth_deg, elevation_deg) of the sun at time dt_utc."""
     import pvlib
 
     times = pd.DatetimeIndex([dt_utc])
     solpos = pvlib.solarposition.get_solarposition(
         times, geo.lat, geo.lon, altitude=geo.alt
     )
-    azimuth = float(solpos["azimuth"].iloc[0])      # 0=Nord, im Uhrzeigersinn
+    azimuth = float(solpos["azimuth"].iloc[0])      # 0=north, clockwise
     elevation = float(solpos["apparent_elevation"].iloc[0])
     return azimuth, elevation
 
@@ -268,7 +270,7 @@ def process_image(
     cy = geo.center_y if geo.center_y is not None else height / 2
     r_max = geo.radius_px if geo.radius_px is not None else min(width, height) / 2
     fov_circle = circular_mask(height, width, cx, cy, r_max - edge_margin_px)
-    classes[~fov_circle] = HO_MASKE
+    classes[~fov_circle] = HO_MASK
 
     # --- Sonnenkreis maskieren ---
     azimuth_deg, elevation_deg = sun_position(dt_utc, geo)
@@ -276,12 +278,12 @@ def process_image(
     if sun_xy is not None:
         sx, sy = sun_xy
         sun_circle = circular_mask(height, width, sx, sy, sun_radius_px)
-        classes[sun_circle] = HO_SONNE
+        classes[sun_circle] = HO_SUN
 
     # --- Cloud Fraction berechnen (Maske/Sonne/Unbekannt ausgeschlossen) ---
-    cloud_px = np.count_nonzero(classes == HO_WOLKE)
-    sky_px = np.count_nonzero(classes == HO_HIMMEL)
-    both_px = np.count_nonzero(classes == HO_BEIDES)
+    cloud_px = np.count_nonzero(classes == HO_CLOUD)
+    sky_px = np.count_nonzero(classes == HO_SKY)
+    both_px = np.count_nonzero(classes == HO_BOTH)
     valid_px = cloud_px + sky_px + both_px
     if valid_px == 0:
         cloud_fraction = np.nan
