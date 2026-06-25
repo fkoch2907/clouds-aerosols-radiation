@@ -194,7 +194,7 @@ def sun_position(dt_utc: datetime, geo: CameraGeometry) -> tuple[float, float]:
 
 
 def zenith_to_radius(zenith_deg: float, fov_deg: float, r_max: float) -> float:
-    """Equidistante Fisheye-Projektion: r ~ proportional zum Zenitwinkel."""
+    """Equidistant fisheye-projection: r ~ proportional to zenith angle."""
     zenith_deg = max(0.0, min(zenith_deg, fov_deg / 2))
     return r_max * (zenith_deg / (fov_deg / 2))
 
@@ -206,8 +206,7 @@ def sun_pixel_position(
     height: int,
     geo: CameraGeometry,
 ) -> tuple[int, int] | None:
-    """Rechnet Sonnen-Azimuth/Elevation in Bildpixel um. Gibt None zurück,
-    wenn die Sonne unter dem Horizont steht (Nachtbild)."""
+    """Converts sun azimuth/elevation to image coordinates. Returns None if the sun is below the horizon (night image)."""
     if elevation_deg <= 0:
         return None
 
@@ -218,7 +217,7 @@ def sun_pixel_position(
     zenith_deg = 90.0 - elevation_deg
     r = zenith_to_radius(zenith_deg, geo.fov_deg, r_max)
 
-    # Azimuth: 0°=Nord, Uhrzeigersinn über Ost. Bildkonvention: oben=Nord.
+    # azimuth: 0°= north, clockwise over east. Image convention: top = north.
     az_rad = np.deg2rad(azimuth_deg)
     px = cx + r * np.sin(az_rad)
     py = cy - r * np.cos(az_rad)
@@ -226,13 +225,13 @@ def sun_pixel_position(
 
 
 def circular_mask(height: int, width: int, cx: float, cy: float, radius: float) -> np.ndarray:
-    """Boolesche Maske, True = innerhalb des Kreises."""
+    """Boolean mask, True = within the circle."""
     yy, xx = np.mgrid[0:height, 0:width]
     return (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
 
 
 # ----------------------------------------------------------------------
-# 3) Zeitstempel aus Dateinamen
+# 3) Timestamp from filename
 # ----------------------------------------------------------------------
 DEFAULT_TS_REGEX = re.compile(r"(\d{8})_(\d{6})")
 
@@ -240,14 +239,14 @@ DEFAULT_TS_REGEX = re.compile(r"(\d{8})_(\d{6})")
 def parse_timestamp(filename: str, regex: re.Pattern, utc_offset_hours: float) -> datetime:
     m = regex.search(filename)
     if not m:
-        raise ValueError(f"Kein Zeitstempel im Dateinamen gefunden: {filename}")
+        raise ValueError(f"No timestamp found in filename: {filename}")
     date_str, time_str = m.group(1), m.group(2)
     local_dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
     return local_dt.replace(tzinfo=timezone(timedelta(hours=utc_offset_hours))).astimezone(timezone.utc)
 
 
 # ----------------------------------------------------------------------
-# 4) Ein Bild verarbeiten
+# 4) Process an image
 # ----------------------------------------------------------------------
 def process_image(
     img_path: Path,
@@ -265,14 +264,14 @@ def process_image(
     r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     classes = class_table[r, g, b]  # (H, W) Klassen-Code je Pixel
 
-    # --- äußeren Rand maskieren ---
+    # --- mask outer edge ---
     cx = geo.center_x if geo.center_x is not None else width / 2
     cy = geo.center_y if geo.center_y is not None else height / 2
     r_max = geo.radius_px if geo.radius_px is not None else min(width, height) / 2
     fov_circle = circular_mask(height, width, cx, cy, r_max - edge_margin_px)
     classes[~fov_circle] = HO_MASK
 
-    # --- Sonnenkreis maskieren ---
+    # --- mask sun circle ---
     azimuth_deg, elevation_deg = sun_position(dt_utc, geo)
     sun_xy = sun_pixel_position(azimuth_deg, elevation_deg, width, height, geo)
     if sun_xy is not None:
@@ -280,18 +279,16 @@ def process_image(
         sun_circle = circular_mask(height, width, sx, sy, sun_radius_px)
         classes[sun_circle] = HO_SUN
 
-    # --- Cloud Fraction berechnen (Maske/Sonne/Unbekannt ausgeschlossen) ---
+    # --- calculate cloud fraction (both/mask/sun/unknown excluded) ---
     cloud_px = np.count_nonzero(classes == HO_CLOUD)
     sky_px = np.count_nonzero(classes == HO_SKY)
-    both_px = np.count_nonzero(classes == HO_BOTH)
-    valid_px = cloud_px + sky_px + both_px
+    valid_px = cloud_px + sky_px 
     if valid_px == 0:
         cloud_fraction = np.nan
     else:
-        # "Beides"-Pixel werden mit Gewicht 0.5 als Wolke gezählt
-        cloud_fraction = (cloud_px + 0.5 * both_px) / valid_px
+        cloud_fraction = cloud_px / valid_px
 
-    # --- Ausgabebild einfärben und speichern ---
+    # --- create and save output image ---
     out_arr = np.zeros_like(arr)
     for code, color in DISPLAY_COLORS.items():
         out_arr[classes == code] = color
@@ -301,7 +298,7 @@ def process_image(
 
 
 # ----------------------------------------------------------------------
-# 5) Ordner-Workflow + Plot
+# 5) directory workflow + plot
 # ----------------------------------------------------------------------
 def process_folder(
     input_dir: Path,
@@ -321,14 +318,14 @@ def process_folder(
         if p.suffix.lower() in (".jpg", ".jpeg")
     )
     if not image_paths:
-        raise FileNotFoundError(f"Keine JPG-Bilder in {input_dir} gefunden.")
+        raise FileNotFoundError(f"No JPG image found in {input_dir}.")
 
     results = []
     for img_path in image_paths:
         try:
             dt_utc = parse_timestamp(img_path.name, ts_regex, utc_offset_hours)
         except ValueError as e:
-            print(f"  Übersprungen: {e}", file=sys.stderr)
+            print(f"  Skipped: {e}", file=sys.stderr)
             continue
 
         out_path = output_dir / f"{img_path.stem}_classified.jpg"
@@ -362,8 +359,8 @@ def plot_timeseries(results: list[tuple[datetime, float]], out_png: Path, title:
     ax.plot(times, cfs, marker="o", linestyle="-", markersize=3)
     ax.set_ylim(-0.05, 1.05)
     ax.set_ylabel("Cloud fraction")
-    ax.set_xlabel("Zeit (UTC)")
-    ax.set_title(f"Cloud fraction Zeitreihe – {title}")
+    ax.set_xlabel("Time (UTC)")
+    ax.set_title(f"Cloud fraction time series – {title}")
     ax.grid(True, alpha=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -375,31 +372,31 @@ def plot_timeseries(results: list[tuple[datetime, float]], out_png: Path, title:
 # CLI
 # ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Cloud fraction aus Fisheye-Wolkenkamerabildern")
-    parser.add_argument("--input_dir", type=Path, required=True, help="Ordner mit JPG-Bildern eines Tages")
-    parser.add_argument("--output_dir", type=Path, required=True, help="Ziel-Ordner für Output")
-    parser.add_argument("--himmel_file", type=Path, required=True, help="Farbdatei 'Himmel' (FE1/FE3)")
-    parser.add_argument("--wolken_file", type=Path, required=True, help="Farbdatei 'Wolken' (FE1/FE3)")
+    parser = argparse.ArgumentParser(description="Cloud fraction from Fisheye cloud camera images")
+    parser.add_argument("--input_dir", type=Path, required=True, help="Folder with JPG images of one day")
+    parser.add_argument("--output_dir", type=Path, required=True, help="Target folder for output")
+    parser.add_argument("--himmel_file", type=Path, required=True, help="Color file 'Sky' (FE1/FE3)")
+    parser.add_argument("--wolken_file", type=Path, required=True, help="Color file 'Clouds' (FE1/FE3)")
 
-    parser.add_argument("--lat", type=float, required=True, help="Breitengrad der Kamera")
-    parser.add_argument("--lon", type=float, required=True, help="Längengrad der Kamera")
-    parser.add_argument("--alt", type=float, default=0.0, help="Höhe der Kamera über NN (m)")
+    parser.add_argument("--lat", type=float, required=True, help="Latitude of the camera")
+    parser.add_argument("--lon", type=float, required=True, help="Longitude of the camera")
+    parser.add_argument("--alt", type=float, default=0.0, help="Height of the camera above sea level (m)")
 
-    parser.add_argument("--fov_deg", type=float, default=180.0, help="Voller Öffnungswinkel der Fisheye-Optik")
-    parser.add_argument("--center_x", type=float, default=None, help="Bild-x des Fisheye-Zentrums (default: Bildmitte)")
-    parser.add_argument("--center_y", type=float, default=None, help="Bild-y des Fisheye-Zentrums (default: Bildmitte)")
-    parser.add_argument("--circle_radius_px", type=float, default=None, help="Radius des Fisheye-Kreises in Pixel (default: min(w,h)/2)")
-    parser.add_argument("--edge_margin_px", type=float, default=5.0, help="Zusätzlicher Rand, der vom Fisheye-Kreis abgezogen wird")
-    parser.add_argument("--sun_radius_px", type=float, default=25.0, help="Radius des auszuschneidenden Sonnenkreises in Pixel")
+    parser.add_argument("--fov_deg", type=float, default=180.0, help="Full field of view of the fisheye lens")
+    parser.add_argument("--center_x", type=float, default=None, help="Image x-coordinate of the fisheye center (default: image center)")
+    parser.add_argument("--center_y", type=float, default=None, help="Image y-coordinate of the fisheye center (default: image center)")
+    parser.add_argument("--circle_radius_px", type=float, default=None, help="Radius of the fisheye image circle in pixels (default: min(w,h)/2)")
+    parser.add_argument("--edge_margin_px", type=float, default=5.0, help="Additional margin to be subtracted from the fisheye image circle")
+    parser.add_argument("--sun_radius_px", type=float, default=25.0, help="Radius of the sun circle to be cropped in pixels")
 
-    parser.add_argument("--timestamp_regex", type=str, default=None, help=r"Regex für Zeitstempel im Dateinamen, default (\d{8})_(\d{6})")
-    parser.add_argument("--utc_offset_hours", type=float, default=0.0, help="UTC-Offset der Dateinamen-Zeitstempel (lokale Zeit)")
+    parser.add_argument("--timestamp_regex", type=str, default=None, help=r"Regex for timestamp in filename, default (\d{8})_(\d{6})")
+    parser.add_argument("--utc_offset_hours", type=float, default=0.0, help="UTC-Offset of the timestamp from filename (local time)")
 
     args = parser.parse_args()
 
     ts_regex = re.compile(args.timestamp_regex) if args.timestamp_regex else DEFAULT_TS_REGEX
 
-    print("Baue Klassifikationstabelle aus Farbdateien …")
+    print("Building classification table from color files …")
     class_table = build_classification_table(args.himmel_file, args.wolken_file)
 
     geo = CameraGeometry(
@@ -409,13 +406,13 @@ def main():
         radius_px=args.circle_radius_px,
     )
 
-    print(f"Verarbeite Bilder aus {args.input_dir} …")
+    print(f"Processing images from {args.input_dir} …")
     csv_path = process_folder(
         args.input_dir, args.output_dir, class_table, geo,
         args.edge_margin_px, args.sun_radius_px,
         ts_regex, args.utc_offset_hours,
     )
-    print(f"Fertig. Ergebnisse: {csv_path}")
+    print(f"Finished. Results: {csv_path}")
 
 
 if __name__ == "__main__":
