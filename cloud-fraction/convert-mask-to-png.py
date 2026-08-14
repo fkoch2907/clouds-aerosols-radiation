@@ -5,6 +5,8 @@ Convert a numpy mask to a PNG image.
 Usage: python convert-mask-to-png.py, specify filename of mask and save name before running
 Output: png that is black everywhere where the mask is and transparent everywhere else
 
+
+CLI not implemented yet
 """
 
 import numpy as np

@@ -87,7 +87,6 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -95,6 +94,15 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from scipy.ndimage import convolve
+
+from camera_geometry import (
+    CameraGeometry,
+    height_angle_true_from_ideal,
+    pixel_to_sky_angles,
+    resolve_center_radius,
+    sky_angles_to_pixel,
+)
+from land_sea_mask import build_land_sea_mask
 
 # ----------------------------------------------------------------------
 # classification-codes (analog to Pascal-constants in Colorfiles.txt)
@@ -169,16 +177,12 @@ def build_classification_table(sky_path: Path, cloud_path: Path) -> np.ndarray:
 # ----------------------------------------------------------------------
 # 2) Sun position -> image coordinates (Fisheye-geometry)
 # ----------------------------------------------------------------------
-@dataclass
-class CameraGeometry:
-    lat: float
-    lon: float
-    alt: float
-    fov_deg: float           # full field of view of the fisheye lens (typ. 180°)
-    center_x: float | None   # None => image center
-    center_y: float | None
-    radius_px: float | None  # None => min(width,height)/2 - edge_margin
-
+# CameraGeometry, the height-angle correction (Sec. 4.1) and the pixel
+# <-> sky-angle transforms (Sec. 4.2/4.3, Sec. 5) now live in
+# camera_geometry.py so they can be shared with camera_tilt.py and reused
+# by future image-analysis tools. `CameraGeometry.tilt_matrix` carries the
+# day's rotation matrix M as determined by `camera_tilt.py`; if it is not
+# set, M defaults to the identity (perfectly levelled & northed camera).
 
 def sun_position(dt_utc: datetime, geo: CameraGeometry) -> tuple[float, float]:
     """Returns (azimuth_deg, elevation_deg) of the sun at time dt_utc."""
@@ -193,12 +197,6 @@ def sun_position(dt_utc: datetime, geo: CameraGeometry) -> tuple[float, float]:
     return azimuth, elevation
 
 
-def zenith_to_radius(zenith_deg: float, fov_deg: float, r_max: float) -> float:
-    """Equidistant fisheye-projection: r ~ proportional to zenith angle."""
-    zenith_deg = max(0.0, min(zenith_deg, fov_deg / 2))
-    return r_max * (zenith_deg / (fov_deg / 2))
-
-
 def sun_pixel_position(
     azimuth_deg: float,
     elevation_deg: float,
@@ -206,21 +204,14 @@ def sun_pixel_position(
     height: int,
     geo: CameraGeometry,
 ) -> tuple[int, int] | None:
-    """Converts sun azimuth/elevation to image coordinates. Returns None if the sun is below the horizon (night image)."""
+    """Converts the sun's true azimuth/elevation to image coordinates,
+    including the lens height-angle correction (Sec. 4.1, Eq. 3) and the
+    day's camera-tilt rotation M (Sec. 5), if set on `geo`. Returns None
+    if the sun is below the horizon (night image)."""
     if elevation_deg <= 0:
         return None
-
-    cx = geo.center_x if geo.center_x is not None else width / 2
-    cy = geo.center_y if geo.center_y is not None else height / 2
-    r_max = geo.radius_px if geo.radius_px is not None else min(width, height) / 2
-
-    zenith_deg = 90.0 - elevation_deg
-    r = zenith_to_radius(zenith_deg, geo.fov_deg, r_max)
-
-    # azimuth: 0°= north, clockwise over east. Image convention: top = north.
-    az_rad = np.deg2rad(azimuth_deg)
-    px = cx + r * np.sin(az_rad)
-    py = cy - r * np.cos(az_rad)
+    cx, cy, r_max = resolve_center_radius(geo, width, height)
+    px, py = sky_angles_to_pixel(azimuth_deg, elevation_deg, cx, cy, r_max, geo)
     return int(round(px)), int(round(py))
 
 
@@ -228,6 +219,68 @@ def circular_mask(height: int, width: int, cx: float, cy: float, radius: float) 
     """Boolean mask, True = within the circle."""
     yy, xx = np.mgrid[0:height, 0:width]
     return (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
+
+
+def load_custom_mask(mask_path: Path, width: int, height: int) -> np.ndarray:
+    """Load an optional custom mask from .npy or .png.
+
+    The returned array is boolean with True for pixels that should be masked.
+    For PNG files, non-zero pixels are treated as masked.
+    """
+    suffix = mask_path.suffix.lower()
+    if suffix == ".npy":
+        mask = np.load(mask_path)
+    elif suffix == ".png":
+        mask = np.array(Image.open(mask_path).convert("L"))
+    else:
+        raise ValueError(f"Unsupported mask format '{mask_path.suffix}'. Use .npy or .png.")
+
+    if mask.ndim == 3:
+        mask = np.any(mask > 0, axis=2)
+    else:
+        mask = mask > 0
+
+    if mask.shape != (height, width):
+        raise ValueError(
+            f"Custom mask {mask_path} has shape {mask.shape}, expected {(height, width)}."
+        )
+
+    return mask
+
+
+def solid_angle_weight_map(
+    height: int,
+    width: int,
+    cx: float,
+    cy: float,
+    a: float,
+    geo: CameraGeometry,
+) -> np.ndarray:
+    """Per-pixel weight proportional to the solid angle that one pixel
+    covers on the sky (PDF Sec. 6.2):
+
+        (1 px)^2 ≙ (cos ε / z) * 0.1704e-5 sr ,
+
+    with z = 1 - eps_ideal/90 (Eq. 1) the zenith-distance fraction read
+    directly off the pixel's distance to the image centre, and ε the
+    *actual* height angle of that pixel on the real sky -- i.e. after
+    both the lens height-angle correction (Eq. 2) and, if known, the
+    day's camera-tilt rotation M (Sec. 5) have been applied via
+    `pixel_to_sky_angles`. We drop the constant factor since only the
+    ratio of summed weights is needed for the cloud fraction; that
+    constant cancels out.
+    """
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    x0 = xx - cx
+    y0 = yy - cy
+    r = np.sqrt(x0 ** 2 + y0 ** 2)
+    z = np.clip(r / a, 0.0, 1.0)  # = 1 - eps_ideal/90 (Eq. 1), unaffected by tilt
+
+    _az_true, eps_true = pixel_to_sky_angles(xx, yy, cx, cy, a, geo)
+    cos_eps = np.cos(np.deg2rad(eps_true))
+    z_safe = np.maximum(z, 1e-6)  # avoid 0/0 right at the zenith pixel(s)
+    weight = cos_eps / z_safe
+    return weight
 
 
 # ----------------------------------------------------------------------
@@ -256,7 +309,10 @@ def process_image(
     edge_margin_px: float,
     sun_radius_px: float,
     dt_utc: datetime,
-) -> float:
+    custom_mask: np.ndarray | None = None,
+    land_mask: np.ndarray | None = None,
+    sea_mask: np.ndarray | None = None,
+) -> dict:
     img = Image.open(img_path).convert("RGB")
     arr = np.array(img)  # (H, W, 3) uint8
     height, width, _ = arr.shape
@@ -265,11 +321,12 @@ def process_image(
     classes = class_table[r, g, b]  # (H, W) Klassen-Code je Pixel
 
     # --- mask outer edge ---
-    cx = geo.center_x if geo.center_x is not None else width / 2
-    cy = geo.center_y if geo.center_y is not None else height / 2
-    r_max = geo.radius_px if geo.radius_px is not None else min(width, height) / 2
+    cx, cy, r_max = resolve_center_radius(geo, width, height)
     fov_circle = circular_mask(height, width, cx, cy, r_max - edge_margin_px)
-    classes[~fov_circle] = HO_MASK
+    mask_outer_edge = ~fov_circle
+    if custom_mask is not None:
+        mask_outer_edge = mask_outer_edge | custom_mask
+    classes[mask_outer_edge] = HO_MASK
 
     # --- mask sun circle ---
     azimuth_deg, elevation_deg = sun_position(dt_utc, geo)
@@ -279,14 +336,35 @@ def process_image(
         sun_circle = circular_mask(height, width, sx, sy, sun_radius_px)
         classes[sun_circle] = HO_SUN
 
-    # --- calculate cloud fraction (both/mask/sun/unknown excluded) ---
-    cloud_px = np.count_nonzero(classes == HO_CLOUD)
-    sky_px = np.count_nonzero(classes == HO_SKY)
-    valid_px = cloud_px + sky_px 
-    if valid_px == 0:
-        cloud_fraction = np.nan
-    else:
-        cloud_fraction = cloud_px / valid_px
+    if custom_mask is not None:
+        classes[custom_mask] = HO_MASK
+
+    # --- calculate cloud fraction using solid angles, not raw pixel counts ---
+    # PDF Sec. 6.2/7.5: a pixel near the zenith covers a much smaller solid
+    # angle than a pixel near the horizon, so pixels must be weighted by the
+    # solid angle they represent before forming the cloud/sky ratio
+    # (b1 = Ω(Wolke) / (Ω(Himmel)+Ω(Wolke))).
+    weights = solid_angle_weight_map(height, width, cx, cy, r_max, geo)
+
+    def region_fraction(region_mask: np.ndarray | None) -> float:
+        # region_mask=None -> whole image (total). Cloud/sky classes already
+        # exclude obstructed/masked/sun pixels (HO_MASK, HO_SUN, HO_UNKNOWN,
+        # HO_BOTH), so no separate validity mask is needed here.
+        cloud_sel = classes == HO_CLOUD
+        sky_sel = classes == HO_SKY
+        if region_mask is not None:
+            cloud_sel = cloud_sel & region_mask
+            sky_sel = sky_sel & region_mask
+        cloud_omega = weights[cloud_sel].sum()
+        sky_omega = weights[sky_sel].sum()
+        valid_omega = cloud_omega + sky_omega
+        return cloud_omega / valid_omega if valid_omega > 0 else np.nan
+
+    cloud_fraction = {
+        "total": region_fraction(None),
+        "land": region_fraction(land_mask) if land_mask is not None else np.nan,
+        "sea": region_fraction(sea_mask) if sea_mask is not None else np.nan,
+    }
 
     # --- create and save output image ---
     out_arr = np.zeros_like(arr)
@@ -309,6 +387,9 @@ def process_folder(
     sun_radius_px: float,
     ts_regex: re.Pattern,
     utc_offset_hours: float,
+    custom_mask_path: Path | None = None,
+    coastline_bearing_deg: float | None = None,
+    sea_side: str = "cw",
 ) -> Path:
     import csv
 
@@ -319,6 +400,23 @@ def process_folder(
     )
     if not image_paths:
         raise FileNotFoundError(f"No JPG image found in {input_dir}.")
+
+    custom_mask = None
+    if custom_mask_path is not None:
+        with Image.open(image_paths[0]) as first_img:
+            width, height = first_img.size
+        custom_mask = load_custom_mask(custom_mask_path, width, height)
+
+    # Land/sea mask is static for a fixed camera -- build it once from the
+    # first image's dimensions and reuse for every frame in the folder,
+    # rather than recomputing it per image.
+    land_mask = sea_mask = None
+    if coastline_bearing_deg is not None:
+        first_img = np.array(Image.open(image_paths[0]))
+        h0, w0 = first_img.shape[:2]
+        land_mask, sea_mask = build_land_sea_mask(geo, w0, h0, coastline_bearing_deg, sea_side)
+        print(f"Built land/sea mask (bearing={coastline_bearing_deg}, sea_side={sea_side}): "
+              f"{land_mask.sum()} land px, {sea_mask.sum()} sea px")
 
     results = []
     for img_path in image_paths:
@@ -332,35 +430,47 @@ def process_folder(
         cf = process_image(
             img_path, out_path, class_table, geo,
             edge_margin_px, sun_radius_px, dt_utc,
+            custom_mask=custom_mask,
+            land_mask=land_mask, sea_mask=sea_mask,
         )
         results.append((dt_utc, cf))
-        print(f"  {img_path.name}: cloud fraction = {cf:.3f}")
+        print(
+            f"  {img_path.name}: total = {cf['total']:.3f}, "
+            f"land = {cf['land']:.3f}, sea = {cf['sea']:.3f}"
+        )
 
     csv_path = output_dir / "cloud_fraction_timeseries.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp_utc", "cloud_fraction"])
+        writer.writerow(["timestamp_utc", "cloud_fraction_total", "cloud_fraction_land", "cloud_fraction_sea"])
         for dt_utc, cf in results:
-            writer.writerow([dt_utc.isoformat(), f"{cf:.4f}"])
+            writer.writerow([dt_utc.isoformat(), f"{cf['total']:.4f}", f"{cf['land']:.4f}", f"{cf['sea']:.4f}"])
 
     plot_timeseries(results, output_dir / "cloud_fraction_timeseries.png", input_dir.name)
     return csv_path
 
 
-def plot_timeseries(results: list[tuple[datetime, float]], out_png: Path, title: str) -> None:
+def plot_timeseries(results: list[tuple[datetime, dict]], out_png: Path, title: str) -> None:
     import matplotlib.pyplot as plt
 
     if not results:
         return
     times = [r[0] for r in results]
-    cfs = [r[1] for r in results]
+    totals = [r[1]["total"] for r in results]
+    lands = [r[1]["land"] for r in results]
+    seas = [r[1]["sea"] for r in results]
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(times, cfs, marker="o", linestyle="-", markersize=3)
+    ax.plot(times, totals, marker="o", linestyle="-", markersize=3, label="Total", color="black")
+    if not all(np.isnan(v) for v in lands):
+        ax.plot(times, lands, marker="o", linestyle="--", markersize=3, label="Land", color="tab:green")
+    if not all(np.isnan(v) for v in seas):
+        ax.plot(times, seas, marker="o", linestyle="--", markersize=3, label="Sea", color="tab:blue")
     ax.set_ylim(-0.05, 1.05)
     ax.set_ylabel("Cloud fraction")
     ax.set_xlabel("Time (UTC)")
     ax.set_title(f"Cloud fraction time series – {title}")
+    ax.legend()
     ax.grid(True, alpha=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -388,6 +498,35 @@ def main():
     parser.add_argument("--circle_radius_px", type=float, default=None, help="Radius of the fisheye image circle in pixels (default: min(w,h)/2)")
     parser.add_argument("--edge_margin_px", type=float, default=5.0, help="Additional margin to be subtracted from the fisheye image circle")
     parser.add_argument("--sun_radius_px", type=float, default=25.0, help="Radius of the sun circle to be cropped in pixels")
+    parser.add_argument(
+        "--custom_mask_file", type=Path, default=None,
+        help="Optional additional mask file (.npy or .png) with the same size as the input images.",
+    )
+    parser.add_argument(
+        "--no_height_correction", action="store_true",
+        help="Disable the camera-specific height-angle correction polynomials "
+             "(PDF Sec. 4.1, Eq. 2/3) and use the plain ideal equidistant "
+             "projection instead.",
+    )
+    parser.add_argument(
+        "--tilt_matrix_file", type=Path, default=None,
+        help="JSON file with the day's camera-tilt rotation matrix M, as "
+             "written by camera_tilt.py. If omitted, the camera is assumed "
+             "to be perfectly levelled and northed (M = identity).",
+    )
+    parser.add_argument(
+        "--coastline_bearing_deg", type=float, default=None,
+        help="Real compass bearing (0=N, clockwise) of the coastline, as "
+             "read off a map. If set, land/sea cloud fraction is computed "
+             "in addition to the total, using a straight line through the "
+             "image center (valid given camera-to-coast distance < 200 m).",
+    )
+    parser.add_argument(
+        "--sea_side", choices=["cw", "ccw"], default="cw",
+        help="Which side of the coastline bearing line (going clockwise "
+             "from the bearing) is the sea. Flip if land/sea come out "
+             "swapped -- check the preview from land_sea_mask.py first.",
+    )
 
     parser.add_argument("--timestamp_regex", type=str, default=None, help=r"Regex for timestamp in filename, default (\d{8})_(\d{6})")
     parser.add_argument("--utc_offset_hours", type=float, default=0.0, help="UTC-Offset of the timestamp from filename (local time)")
@@ -404,13 +543,20 @@ def main():
         fov_deg=args.fov_deg,
         center_x=args.center_x, center_y=args.center_y,
         radius_px=args.circle_radius_px,
+        apply_height_correction=not args.no_height_correction,
     )
+    if args.tilt_matrix_file is not None:
+        geo.load_tilt_matrix(args.tilt_matrix_file)
+        print(f"Loaded camera-tilt matrix from {args.tilt_matrix_file}")
 
     print(f"Processing images from {args.input_dir} …")
     csv_path = process_folder(
         args.input_dir, args.output_dir, class_table, geo,
         args.edge_margin_px, args.sun_radius_px,
         ts_regex, args.utc_offset_hours,
+        custom_mask_path=args.custom_mask_file,
+        coastline_bearing_deg=args.coastline_bearing_deg,
+        sea_side=args.sea_side,
     )
     print(f"Finished. Results: {csv_path}")
 
