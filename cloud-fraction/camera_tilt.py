@@ -436,9 +436,6 @@ def plot_observations(observations: list[dict], out_png: Path) -> None:
     px = [o["pixel_xy"][0] for o in observations]
     py = [o["pixel_xy"][1] for o in observations]
     ax.scatter(px, py, c="orange", label="detected sun position", zorder=3)
-    for o in observations:
-        ax.annotate(o["time_utc"].strftime("%H:%M"), o["pixel_xy"], fontsize=7,
-                    xytext=(4, 4), textcoords="offset points")
     ax.set_xlabel("x (px)")
     ax.set_ylabel("y (px)")
     ax.invert_yaxis()
