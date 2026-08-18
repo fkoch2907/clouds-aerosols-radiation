@@ -2,16 +2,31 @@
   "CAM1": {
     "lat": "54.5276715",
     "lon": "11.0604872",
-    "alt": "10"
+    "alt": "10",
+    "himmel_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Himmel_FE1_20150928_1616.col",
+    "wolken_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Wolken_FE1_20150928_1616.col",
+    "land_sea_mask": {
+      "type": "boundaries",
+      "boundaries": ["90:land", "220:sea"]
+    }
   },
   "CAM2": {
     "lat": "54.4564678",
     "lon": "11.2729701",
-    "alt": "10"
+    "alt": "10",
+    "himmel_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Himmel_FE1_20150928_1616.col",
+    "wolken_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Wolken_FE1_20150928_1616.col",
+    "land_sea_mask": {
+      "type": "boundaries",
+      "boundaries": ["170:land", "220:sea"]
+    }
   },
   "CAM4": {
     "lat": "54.43289448862771",
     "lon": "11.192263109432092",
-    "alt": "16"
+    "alt": "16",
+    "himmel_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Himmel_FE3_20150908_1603.col",
+    "wolken_file": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation/cloud-fraction/colorfiles/Wolken_FE3_20150908_1603.col",
+    "land_sea_mask": null
   }
 }
