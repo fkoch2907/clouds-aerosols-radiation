@@ -102,7 +102,7 @@ from camera_geometry import (
     resolve_center_radius,
     sky_angles_to_pixel,
 )
-from land_sea_mask import build_land_sea_mask
+from land_sea_mask import build_land_sea_mask, build_sector_mask
 
 # ----------------------------------------------------------------------
 # classification-codes (analog to Pascal-constants in Colorfiles.txt)
@@ -390,6 +390,7 @@ def process_folder(
     custom_mask_path: Path | None = None,
     coastline_bearing_deg: float | None = None,
     sea_side: str = "cw",
+    boundaries: list[tuple[float, str]] | None = None,
 ) -> Path:
     import csv
 
@@ -411,7 +412,21 @@ def process_folder(
     # first image's dimensions and reuse for every frame in the folder,
     # rather than recomputing it per image.
     land_mask = sea_mask = None
-    if coastline_bearing_deg is not None:
+    sector_masks = None
+    if boundaries is not None:
+        # Use sector-based boundary masking
+        first_img = np.array(Image.open(image_paths[0]))
+        h0, w0 = first_img.shape[:2]
+        sector_masks = build_sector_mask(geo, w0, h0, boundaries)
+        print(f"Built sector mask from boundaries: "
+              f"{', '.join(f'{label}={mask.sum()} px' for label, mask in sector_masks.items())}")
+        # Set land_mask and sea_mask if they exist in the sectors
+        if "land" in sector_masks:
+            land_mask = sector_masks["land"]
+        if "sea" in sector_masks:
+            sea_mask = sector_masks["sea"]
+    elif coastline_bearing_deg is not None:
+        # Use bearing-based half-plane masking
         first_img = np.array(Image.open(image_paths[0]))
         h0, w0 = first_img.shape[:2]
         land_mask, sea_mask = build_land_sea_mask(geo, w0, h0, coastline_bearing_deg, sea_side)
@@ -527,6 +542,12 @@ def main():
              "from the bearing) is the sea. Flip if land/sea come out "
              "swapped -- check the preview from land_sea_mask.py first.",
     )
+    parser.add_argument(
+        "--boundary", action="append", default=None, metavar="BEARING:LABEL",
+        help="Boundary line as 'bearing:label' pair, e.g. --boundary 220:land --boundary 90:sea. "
+             "Angles are 0=North, increasing clockwise. Can be used multiple times to define "
+             "multiple angular sectors. Overrides --coastline_bearing_deg if specified.",
+    )
 
     parser.add_argument("--timestamp_regex", type=str, default=None, help=r"Regex for timestamp in filename, default (\d{8})_(\d{6})")
     parser.add_argument("--utc_offset_hours", type=float, default=0.0, help="UTC-Offset of the timestamp from filename (local time)")
@@ -534,6 +555,21 @@ def main():
     args = parser.parse_args()
 
     ts_regex = re.compile(args.timestamp_regex) if args.timestamp_regex else DEFAULT_TS_REGEX
+
+    # Parse boundaries if provided
+    boundaries = None
+    if args.boundary:
+        boundaries = []
+        for entry in args.boundary:
+            parts = entry.split(":")
+            if len(parts) != 2:
+                raise ValueError(f"Invalid boundary format '{entry}': expected 'bearing:label'")
+            try:
+                bearing_deg = float(parts[0])
+                label = parts[1]
+                boundaries.append((bearing_deg, label))
+            except ValueError as e:
+                raise ValueError(f"Invalid boundary '{entry}': bearing must be a number. {e}")
 
     print("Building classification table from color files …")
     class_table = build_classification_table(args.himmel_file, args.wolken_file)
@@ -557,6 +593,7 @@ def main():
         custom_mask_path=args.custom_mask_file,
         coastline_bearing_deg=args.coastline_bearing_deg,
         sea_side=args.sea_side,
+        boundaries=boundaries,
     )
     print(f"Finished. Results: {csv_path}")
 

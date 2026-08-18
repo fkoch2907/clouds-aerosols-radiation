@@ -82,14 +82,35 @@ def load_camera_coordinates(path: str | Path | None = None) -> dict[str, dict[st
 
 
 def resolve_camera_settings(cfg: dict[str, Any], camera_coords: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Fill in lat/lon/alt values from camera_coordinates.json unless explicitly set in config."""
+    """Fill in lat/lon/alt and land/sea mask settings from camera_coordinates.json unless explicitly set in config."""
     camera_name = str(cfg.get("camera", "")).strip().upper()
     defaults = camera_coords.get(camera_name, {}) if camera_name else {}
     resolved = dict(cfg)
 
-    for key in ("lat", "lon", "alt"):
+    # Resolve location coordinates and colorfiles
+    for key in ("lat", "lon", "alt", "himmel_file", "wolken_file"):
         if resolved.get(key) in (None, "") and key in defaults and str(defaults[key]).strip() != "":
             resolved[key] = defaults[key]
+
+    # Resolve land/sea mask settings from camera metadata
+    mask_settings = defaults.get("land_sea_mask")
+    if mask_settings:
+        mask_type = mask_settings.get("type")
+        if mask_type == "boundaries":
+            boundaries = mask_settings.get("boundaries", [])
+            resolved["_mask_boundaries"] = boundaries
+        elif mask_type == "coastline_bearing":
+            bearing = mask_settings.get("coastline_bearing_deg")
+            sea_side = mask_settings.get("sea_side", "cw")
+            if bearing not in (None, ""):
+                resolved["coastline_bearing_deg"] = bearing
+                resolved["sea_side"] = sea_side
+    else:
+        # No mask specified for this camera
+        resolved.pop("coastline_bearing_deg", None)
+        resolved.pop("sea_side", None)
+        resolved.pop("_mask_boundaries", None)
+
     return resolved
 
 
@@ -131,6 +152,14 @@ def find_tilt_file(camera_root: Path | str, day_dir: Path | str | None = None) -
     return None
 
 
+def output_exists(output_dir: Path) -> bool:
+    """Check if output directory contains any processed files (indicating prior processing)."""
+    if not output_dir.exists():
+        return False
+    # Check if any files exist in the output directory
+    return any(output_dir.iterdir())
+
+
 def build_cloud_fraction_command(cfg: dict[str, Any], input_dir: Path, output_dir: Path, tilt_file: Path | None) -> list[str]:
     script_path = resolve_path(cfg.get("cloud_fraction_script", "cloud-fraction/cloud_fraction.py"), Path(cfg["base_dir"]))
     if script_path is None:
@@ -168,6 +197,12 @@ def build_cloud_fraction_command(cfg: dict[str, Any], input_dir: Path, output_di
     if cfg.get("no_height_correction"):
         cmd.append("--no_height_correction")
 
+    # Add boundary specifications if present (from land_sea_mask type="boundaries")
+    boundaries = cfg.get("_mask_boundaries")
+    if boundaries and isinstance(boundaries, list):
+        for boundary in boundaries:
+            cmd.extend(["--boundary", str(boundary)])
+
     if tilt_file is not None:
         cmd.extend(["--tilt_matrix_file", str(tilt_file)])
 
@@ -197,10 +232,18 @@ def run_batch(config_path: str | Path | None = None, dry_run: bool = False) -> l
         raise FileNotFoundError(f"No entries for camera {cfg.get('camera')} found in {input_list}.")
 
     output_root = resolve_path(cfg.get("output_root", "Data/CloudCamProcessed"), base_dir) or (base_dir / "Data/CloudCamProcessed")
+    force_recalculate = cfg.get("force_recalculate", False)
     processed: list[Path] = []
     for day_dir in selected_days:
         if not day_dir.exists():
-            print(f"Data for day {day_dir.name} not available.")
+            print(f"Data for day {day_dir.parent.name} not available.")
+            continue
+
+        output_dir = build_output_dir(day_dir, output_root)
+
+        # Check if already processed and force_recalculate is false
+        if output_exists(output_dir) and not force_recalculate:
+            print(f"Data for day {day_dir.parent.name} already processed (skipping; set force_recalculate=true to reprocess).")
             continue
 
         camera_root = day_dir.parent.parent
@@ -208,7 +251,6 @@ def run_batch(config_path: str | Path | None = None, dry_run: bool = False) -> l
         if tilt_file is None:
             print(f"No tilt matrix found for {camera_root.name}; proceeding without tilt matrix (assumes perfect leveling and northing).")
 
-        output_dir = build_output_dir(day_dir, output_root)
         output_dir.mkdir(parents=True, exist_ok=True)
         command = build_cloud_fraction_command(cfg, day_dir, output_dir, tilt_file)
         processed.append(output_dir)
