@@ -1,12 +1,12 @@
 {
   "camera": "CAM2",
-  "base_dir": "..",
+  "base_dir": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation",
   "camera_coordinates_file": "cloud-fraction/camera_coordinates.json",
   "input_list": "Data/CloudCam/img-for-analysis.txt",
   "output_root": "Data/CloudCamProcessed",
   "cloud_fraction_script": "cloud-fraction/cloud_fraction.py",
-  "himmel_file": "cloud-fraction/colorfiles/Himmel_FE1_20150928_1616.col",
-  "wolken_file": "cloud-fraction/colorfiles/Wolken_FE1_20150928_1616.col",
+  "himmel_file": "",
+  "wolken_file": "",
   "lat": "",
   "lon": "",
   "alt": "",
@@ -17,10 +17,9 @@
   "edge_margin_px": 5.0,
   "sun_radius_px": 150.0,
   "custom_mask_file": "cloud-fraction/masks/mask_WKM2.npy",
+  "force_recalculate": true,
   "no_height_correction": false,
   "tilt_matrix_file": null,
-  "coastline_bearing_deg": 330,
-  "sea_side": "cw",
   "timestamp_regex": "",
   "utc_offset_hours": 0.0
 }
