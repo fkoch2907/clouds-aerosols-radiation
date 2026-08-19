@@ -1,5 +1,5 @@
 {
-  "camera": "CAM2",
+  "camera": "CAM1",
   "base_dir": "/Users/franziskakoch/Documents/Uni/UHH/second_semester/LEX/clouds-aerosols-radiation",
   "camera_coordinates_file": "cloud-fraction/camera_coordinates.json",
   "input_list": "Data/CloudCam/img-for-analysis.txt",
@@ -16,10 +16,11 @@
   "circle_radius_px": null,
   "edge_margin_px": 5.0,
   "sun_radius_px": 150.0,
-  "custom_mask_file": "cloud-fraction/masks/mask_WKM2.npy",
+  "custom_mask_file": "cloud-fraction/masks/mask_WKM1.npy",
   "force_recalculate": true,
   "no_height_correction": false,
   "tilt_matrix_file": null,
   "timestamp_regex": "",
-  "utc_offset_hours": 0.0
+  "utc_offset_hours": 0.0,
+  "calculate_brightness": true
 }

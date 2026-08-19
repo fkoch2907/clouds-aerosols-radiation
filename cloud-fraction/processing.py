@@ -184,6 +184,7 @@ def build_cloud_fraction_command(cfg: dict[str, Any], input_dir: Path, output_di
         "sea_side",
         "timestamp_regex",
         "utc_offset_hours",
+        "calculate_brightness",
     ):
         value = cfg.get(option_name)
         if value in (None, ""):

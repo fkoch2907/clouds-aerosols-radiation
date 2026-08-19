@@ -1,12 +1,15 @@
 from pathlib import Path
 
 from processing import (
+    build_cloud_fraction_command,
     build_output_dir,
     filter_input_dirs,
     load_camera_coordinates,
     load_config,
     resolve_camera_settings,
 )
+from cloud_fraction import calculate_weighted_cloud_brightness
+import numpy as np
 
 
 def test_load_config_defaults(tmp_path):
@@ -69,3 +72,30 @@ def test_resolve_camera_settings_prefers_config_over_file():
     assert resolved["lat"] == 10.0
     assert resolved["lon"] == 20.0
     assert resolved["alt"] == 30.0
+
+
+def test_calculate_weighted_cloud_brightness_uses_solid_angle_weights():
+    arr = np.array([
+        [[10, 20, 30], [100, 110, 120]],
+        [[200, 210, 220], [40, 50, 60]],
+    ], dtype=np.uint8)
+    classes = np.array([[1, 1], [0, 1]], dtype=np.uint8)
+    weights = np.array([[1.0, 3.0], [10.0, 2.0]])
+
+    result = calculate_weighted_cloud_brightness(arr, classes, weights)
+
+    expected = np.average(arr[classes == 1], axis=0, weights=weights[classes == 1])
+    assert np.allclose([result["mean_r"], result["mean_g"], result["mean_b"]], expected)
+    assert result["total_mean_brightness"] == np.mean(expected)
+
+
+def test_build_cloud_fraction_command_adds_brightness_flag():
+    cfg = {
+        "base_dir": "/repo",
+        "cloud_fraction_script": "cloud-fraction/cloud_fraction.py",
+        "calculate_brightness": True,
+    }
+
+    command = build_cloud_fraction_command(cfg, Path("/repo/input"), Path("/repo/output"), None)
+
+    assert "--calculate_brightness" in command

@@ -283,6 +283,38 @@ def solid_angle_weight_map(
     return weight
 
 
+def calculate_weighted_cloud_brightness(
+    arr: np.ndarray,
+    classes: np.ndarray,
+    weights: np.ndarray,
+) -> dict[str, float]:
+    """Calculate solid-angle-weighted RGB brightness for cloud pixels.
+
+    Pixels classified as ``HO_CLOUD`` are weighted by the sky solid angle
+    represented by each pixel. The returned channel means use the original
+    image values (0--255); ``total_mean_brightness`` is their arithmetic mean.
+    """
+    cloud_pixels = classes == HO_CLOUD
+    cloud_weight = weights[cloud_pixels]
+    total_weight = cloud_weight.sum()
+    if total_weight <= 0:
+        return {
+            "mean_r": np.nan,
+            "mean_g": np.nan,
+            "mean_b": np.nan,
+            "total_mean_brightness": np.nan,
+        }
+
+    channel_means = np.average(arr[cloud_pixels], axis=0, weights=cloud_weight)
+    mean_r, mean_g, mean_b = (float(value) for value in channel_means)
+    return {
+        "mean_r": mean_r,
+        "mean_g": mean_g,
+        "mean_b": mean_b,
+        "total_mean_brightness": (mean_r + mean_g + mean_b) / 3.0,
+    }
+
+
 # ----------------------------------------------------------------------
 # 3) Timestamp from filename
 # ----------------------------------------------------------------------
@@ -312,6 +344,7 @@ def process_image(
     custom_mask: np.ndarray | None = None,
     land_mask: np.ndarray | None = None,
     sea_mask: np.ndarray | None = None,
+    calculate_brightness: bool = False,
 ) -> dict:
     img = Image.open(img_path).convert("RGB")
     arr = np.array(img)  # (H, W, 3) uint8
@@ -365,6 +398,8 @@ def process_image(
         "land": region_fraction(land_mask) if land_mask is not None else np.nan,
         "sea": region_fraction(sea_mask) if sea_mask is not None else np.nan,
     }
+    if calculate_brightness:
+        cloud_fraction["brightness"] = calculate_weighted_cloud_brightness(arr, classes, weights)
 
     # --- create and save output image ---
     out_arr = np.zeros_like(arr)
@@ -391,6 +426,7 @@ def process_folder(
     coastline_bearing_deg: float | None = None,
     sea_side: str = "cw",
     boundaries: list[tuple[float, str]] | None = None,
+    calculate_brightness: bool = False,
 ) -> Path:
     import csv
 
@@ -434,6 +470,7 @@ def process_folder(
               f"{land_mask.sum()} land px, {sea_mask.sum()} sea px")
 
     results = []
+    brightness_results = []
     for img_path in image_paths:
         try:
             dt_utc = parse_timestamp(img_path.name, ts_regex, utc_offset_hours)
@@ -447,8 +484,12 @@ def process_folder(
             edge_margin_px, sun_radius_px, dt_utc,
             custom_mask=custom_mask,
             land_mask=land_mask, sea_mask=sea_mask,
+            calculate_brightness=calculate_brightness,
         )
+        brightness = cf.pop("brightness", None)
         results.append((dt_utc, cf))
+        if brightness is not None:
+            brightness_results.append((dt_utc, brightness))
         print(
             f"  {img_path.name}: total = {cf['total']:.3f}, "
             f"land = {cf['land']:.3f}, sea = {cf['sea']:.3f}"
@@ -460,6 +501,20 @@ def process_folder(
         writer.writerow(["timestamp_utc", "cloud_fraction_total", "cloud_fraction_land", "cloud_fraction_sea"])
         for dt_utc, cf in results:
             writer.writerow([dt_utc.isoformat(), f"{cf['total']:.4f}", f"{cf['land']:.4f}", f"{cf['sea']:.4f}"])
+
+    if calculate_brightness:
+        brightness_path = output_dir / "brightness.csv"
+        with open(brightness_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp_utc", "mean_r", "mean_g", "mean_b", "total_mean_brightness"])
+            for dt_utc, brightness in brightness_results:
+                writer.writerow([
+                    dt_utc.isoformat(),
+                    f"{brightness['mean_r']:.4f}",
+                    f"{brightness['mean_g']:.4f}",
+                    f"{brightness['mean_b']:.4f}",
+                    f"{brightness['total_mean_brightness']:.4f}",
+                ])
 
     plot_timeseries(results, output_dir / "cloud_fraction_timeseries.png", input_dir.name)
     return csv_path
@@ -551,6 +606,10 @@ def main():
 
     parser.add_argument("--timestamp_regex", type=str, default=None, help=r"Regex for timestamp in filename, default (\d{8})_(\d{6})")
     parser.add_argument("--utc_offset_hours", type=float, default=0.0, help="UTC-Offset of the timestamp from filename (local time)")
+    parser.add_argument(
+        "--calculate_brightness", action="store_true",
+        help="Calculate solid-angle-weighted RGB brightness for cloud pixels and write brightness.csv.",
+    )
 
     args = parser.parse_args()
 
@@ -594,6 +653,7 @@ def main():
         coastline_bearing_deg=args.coastline_bearing_deg,
         sea_side=args.sea_side,
         boundaries=boundaries,
+        calculate_brightness=args.calculate_brightness,
     )
     print(f"Finished. Results: {csv_path}")
 
