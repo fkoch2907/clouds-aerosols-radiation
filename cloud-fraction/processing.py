@@ -185,6 +185,8 @@ def build_cloud_fraction_command(cfg: dict[str, Any], input_dir: Path, output_di
         "timestamp_regex",
         "utc_offset_hours",
         "calculate_brightness",
+        "brightness_min_effective_pixels",
+        "brightness_std_threshold",
     ):
         value = cfg.get(option_name)
         if value in (None, ""):
