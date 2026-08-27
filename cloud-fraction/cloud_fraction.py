@@ -283,21 +283,67 @@ def solid_angle_weight_map(
     return weight
 
 
+def calculate_weighted_cloud_brightness_statistics(
+    arr: np.ndarray,
+    classes: np.ndarray,
+    weights: np.ndarray,
+) -> dict[str, float]:
+    """Calculate unfiltered weighted brightness diagnostics for cloud pixels."""
+    cloud_pixels = classes == HO_CLOUD
+    cloud_weight = weights[cloud_pixels]
+    total_weight = cloud_weight.sum()
+    if total_weight <= 0:
+        return {
+            "cloud_pixel_count": 0.0,
+            "effective_cloud_pixels": np.nan,
+            "mean_r": np.nan,
+            "mean_g": np.nan,
+            "mean_b": np.nan,
+            "std_r": np.nan,
+            "std_g": np.nan,
+            "std_b": np.nan,
+        }
+
+    effective_pixels = total_weight ** 2 / np.sum(cloud_weight ** 2)
+    channel_values = arr[cloud_pixels].astype(np.float64)
+    channel_means = np.average(channel_values, axis=0, weights=cloud_weight)
+    channel_variances = np.average(
+        (channel_values - channel_means) ** 2,
+        axis=0,
+        weights=cloud_weight,
+    )
+    channel_stds = np.sqrt(channel_variances)
+    return {
+        "cloud_pixel_count": float(cloud_pixels.sum()),
+        "effective_cloud_pixels": float(effective_pixels),
+        "mean_r": float(channel_means[0]),
+        "mean_g": float(channel_means[1]),
+        "mean_b": float(channel_means[2]),
+        "std_r": float(channel_stds[0]),
+        "std_g": float(channel_stds[1]),
+        "std_b": float(channel_stds[2]),
+    }
+
+
 def calculate_weighted_cloud_brightness(
     arr: np.ndarray,
     classes: np.ndarray,
     weights: np.ndarray,
+    min_effective_pixels: float = 20.0,
+    std_threshold: float = 50.0,
 ) -> dict[str, float]:
     """Calculate solid-angle-weighted RGB brightness for cloud pixels.
 
     Pixels classified as ``HO_CLOUD`` are weighted by the sky solid angle
     represented by each pixel. The returned channel means use the original
     image values (0--255); ``total_mean_brightness`` is their arithmetic mean.
+    Return NaN values when the effective number of weighted cloud pixels is
+    too small or any channel's weighted standard deviation is too high.
     """
-    cloud_pixels = classes == HO_CLOUD
-    cloud_weight = weights[cloud_pixels]
-    total_weight = cloud_weight.sum()
-    if total_weight <= 0:
+    diagnostics = calculate_weighted_cloud_brightness_statistics(arr, classes, weights)
+    effective_pixels = diagnostics["effective_cloud_pixels"]
+    channel_stds = np.array([diagnostics["std_r"], diagnostics["std_g"], diagnostics["std_b"]])
+    if not np.isfinite(effective_pixels):
         return {
             "mean_r": np.nan,
             "mean_g": np.nan,
@@ -305,8 +351,17 @@ def calculate_weighted_cloud_brightness(
             "total_mean_brightness": np.nan,
         }
 
-    channel_means = np.average(arr[cloud_pixels], axis=0, weights=cloud_weight)
-    mean_r, mean_g, mean_b = (float(value) for value in channel_means)
+    if effective_pixels < min_effective_pixels or np.any(channel_stds > std_threshold):
+        return {
+            "mean_r": np.nan,
+            "mean_g": np.nan,
+            "mean_b": np.nan,
+            "total_mean_brightness": np.nan,
+        }
+
+    mean_r = diagnostics["mean_r"]
+    mean_g = diagnostics["mean_g"]
+    mean_b = diagnostics["mean_b"]
     return {
         "mean_r": mean_r,
         "mean_g": mean_g,
@@ -345,6 +400,8 @@ def process_image(
     land_mask: np.ndarray | None = None,
     sea_mask: np.ndarray | None = None,
     calculate_brightness: bool = False,
+    brightness_min_effective_pixels: float = 20.0,
+    brightness_std_threshold: float = 50.0,
 ) -> dict:
     img = Image.open(img_path).convert("RGB")
     arr = np.array(img)  # (H, W, 3) uint8
@@ -399,7 +456,13 @@ def process_image(
         "sea": region_fraction(sea_mask) if sea_mask is not None else np.nan,
     }
     if calculate_brightness:
-        cloud_fraction["brightness"] = calculate_weighted_cloud_brightness(arr, classes, weights)
+        cloud_fraction["brightness"] = calculate_weighted_cloud_brightness(
+            arr,
+            classes,
+            weights,
+            min_effective_pixels=brightness_min_effective_pixels,
+            std_threshold=brightness_std_threshold,
+        )
 
     # --- create and save output image ---
     out_arr = np.zeros_like(arr)
@@ -427,6 +490,8 @@ def process_folder(
     sea_side: str = "cw",
     boundaries: list[tuple[float, str]] | None = None,
     calculate_brightness: bool = False,
+    brightness_min_effective_pixels: float = 20.0,
+    brightness_std_threshold: float = 50.0,
 ) -> Path:
     import csv
 
@@ -485,6 +550,8 @@ def process_folder(
             custom_mask=custom_mask,
             land_mask=land_mask, sea_mask=sea_mask,
             calculate_brightness=calculate_brightness,
+            brightness_min_effective_pixels=brightness_min_effective_pixels,
+            brightness_std_threshold=brightness_std_threshold,
         )
         brightness = cf.pop("brightness", None)
         results.append((dt_utc, cf))
@@ -530,7 +597,7 @@ def plot_timeseries(results: list[tuple[datetime, dict]], out_png: Path, title: 
     lands = [r[1]["land"] for r in results]
     seas = [r[1]["sea"] for r in results]
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(12, 4))
     ax.plot(times, totals, marker="o", linestyle="-", markersize=3, label="Total", color="black")
     if not all(np.isnan(v) for v in lands):
         ax.plot(times, lands, marker="o", linestyle="--", markersize=3, label="Land", color="tab:green")
@@ -610,6 +677,14 @@ def main():
         "--calculate_brightness", action="store_true",
         help="Calculate solid-angle-weighted RGB brightness for cloud pixels and write brightness.csv.",
     )
+    parser.add_argument(
+        "--brightness_min_effective_pixels", type=float, default=20.0,
+        help="Minimum effective number of cloud pixels required for brightness (default: 20).",
+    )
+    parser.add_argument(
+        "--brightness_std_threshold", type=float, default=50.0,
+        help="Maximum weighted RGB standard deviation for brightness (default: 50).",
+    )
 
     args = parser.parse_args()
 
@@ -654,6 +729,8 @@ def main():
         sea_side=args.sea_side,
         boundaries=boundaries,
         calculate_brightness=args.calculate_brightness,
+        brightness_min_effective_pixels=args.brightness_min_effective_pixels,
+        brightness_std_threshold=args.brightness_std_threshold,
     )
     print(f"Finished. Results: {csv_path}")
 
