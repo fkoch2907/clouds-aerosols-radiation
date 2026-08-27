@@ -22,5 +22,7 @@
   "tilt_matrix_file": null,
   "timestamp_regex": "",
   "utc_offset_hours": 0.0,
-  "calculate_brightness": true
+  "calculate_brightness": false,
+  "brightness_min_effective_pixels": 54.0,
+  "brightness_std_threshold": 63.34
 }
